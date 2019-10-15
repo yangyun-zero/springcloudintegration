@@ -1,0 +1,9 @@
+# bootstrap.yml 优先级比 application.yml 高, 程序启动会先加载改文件
+spring:
+  cloud:
+    config:
+      name: microservicecloud-config-eureka-server # git 上配置文件的名字, 没有后缀 .yml
+      profile: dev
+      label: master
+      # 这里为 config server 程序访问地址,根据 http://config-1000.com/1000/{name}-{profile}.yml可以读取git上指定配置
+      uri: http://config-1000.com:1000

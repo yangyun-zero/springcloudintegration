@@ -1,0 +1,14 @@
+server:
+  port: 8001
+spring:
+  application:
+    name: microservicecloud-config-provider-cilent-dept  # dept 同一组微服务
+  datasource:
+    url: jdbc:mysql://47.107.172.70:3306/cloudDB01
+
+eureka:
+  client:
+    instance:
+      instance-id: provider-8001.com
+info:
+  app.name: microservice-config-provider-client8001

@@ -1,0 +1,8 @@
+spring:
+  cloud:
+    config:
+      name: microservicecloud-config-provider-client  # 从git获取配置项文件名
+#      profile: test
+      profile: dev
+      label: master
+      uri: http://config-1000.com:1000
