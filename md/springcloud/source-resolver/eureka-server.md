@@ -2,17 +2,206 @@
 
 ###Describle: 
 
+#### 关于 ZK 和 Eureka
+
+ZK 的设计原则是 CP, 强一致性和分区容错性. 保证了数据强一致性, 但舍弃了可用性, 如果**出现网络问题可能会影响ZK 的选举, 到之后 ZK 注册中心不可用**
+
+Eureka 的设计原则是 AP, 可用性和分区容错性. 保证了注册中心的可用性, 舍**弃了数据一致性, 各节点间的数据有可能是不一致的(会最终一致)**
+
 #### Eureka：
 
-Eureka Server：注册中心服务端，用于维护和管理注册服务列表
+#####Eureka Instance: 
 
-Eureka Client：注册中心客户端，向注册中心注册服务的应用都可以叫做Eureka Client（包括Eureka Server本身, 因为 Eureka Server 本身也是可以注册到注册中心的）
+当前 Eureka 实例信息
+
+```java
+@ConfigurationProperties("eureka.instance")
+public class EurekaInstanceConfigBean implements CloudEurekaInstanceConfig, EnvironmentAware {
+    // 实例心跳检查间隔时间
+    private int leaseRenewalIntervalInSeconds = 30;
+    
+    // 超时时间, 当服务超过 leaseExpirationDurationInSeconds 时间, Server 就认为它不可用, 然后剔除
+    private int leaseExpirationDurationInSeconds = 90;
+    
+    // 实例元数据, 提供实例上下文和端口
+    private Map<String, String> metadataMap = new HashMap<>();
+    
+    // 实例部署的数据中心. 如: AWS, MyOwn	
+	private DataCenterInfo dataCenterInfo = new MyDataCenterInfo(
+			DataCenterInfo.Name.MyOwn);
+}
+```
+
+#####Eureka Server：
+
+注册中心服务端，用于维护和管理注册服务列表
+
+######  EurekaServerConfigBean 
+
+对注册中心的特性配置
+
+```java
+@ConfigurationProperties(EurekaServerConfigBean.PREFIX)
+public class EurekaServerConfigBean implements EurekaServerConfig {
+    // 自我保护续约百分比阀值因子. 如果实际续约数小于续约数阀值, 则开启自我保护
+    private double renewalPercentThreshold = 0.85;
+    
+    // 续约数阀值更新频率
+    private int renewalThresholdUpdateIntervalMs = 15 * MINUTES;
+
+    // Eureka Server 节点更新频率
+	private int peerEurekaNodesUpdateIntervalMs = 10 * MINUTES;
+    
+    // 当从其他节点同步实例信息为空时等待时间
+    private int waitTimeInMsWhenSyncEmpty = 5 * MINUTES;
+    
+    // 节点间连接的超时时间
+    private int peerNodeConnectTimeoutMs = 200;
+    
+    // 节点间读取信息的超时时间
+    private int peerNodeReadTimeoutMs = 200;
+    
+    // 节点连接的总数
+    private int peerNodeTotalConnections = 1000;
+    
+    // 单个节点间连接数
+    private int peerNodeTotalConnectionsPerHost = 500;
+    
+    // 节点间连接诶空闲超时时间
+    private int peerNodeConnectionIdleTimeoutSeconds = 30;
+    
+    // 增量队列缓存时间
+	private long retentionTimeInMSInDeltaQueue = 3 * MINUTES;
+    
+    // 清理增量队列过期的频率
+    private long deltaRetentionTimerIntervalInMs = 30 * 1000;
+
+    // 剔除任务频率
+	private long evictionIntervalTimerInMs = 60 * 1000;
+    
+    // 注册列表缓存超时时间(当注册列表没有变化时)
+    private long responseCacheAutoExpirationInSeconds = 180;
+    
+    // 注册列表缓存更新频率
+    private long responseCacheUpdateIntervalMs = 30 * 1000;
+    
+    // 是否开启注册列表二级缓存
+    private boolean useReadOnlyResponseCache = true;
+    
+    // 状态同步最大线程数
+    private int maxThreadsForStatusReplication = 1;
+    
+    // 注册信息同步重试次数
+    private int registrySyncRetries = 0;
+    
+    // 注册信息同步重试期间的时间间隔
+    private long registrySyncRetryWaitMs = 30 * 1000;
+    
+    // 节点间同步时间的最大容量
+    private int maxElementsInPeerReplicationPool = 10000;
+    
+    // 节点间同步的最大线程数
+    private int maxThreadsForPeerReplication = 20;
+    
+    // 节点同步的最大时间, 毫秒
+    private int maxTimeForReplication = 30000;
+}
+```
+
+###Eureka 总体架构
+
+![](F:\git\springcloudintegration\md\springcloud\images\eureka_01.png)
+
+#### 服务提供者
+
+1. 启动后, 向注册中心发起 registry 请求, 注册服务
+2. 在运行过程中, 定时向注册中心发送 renew 请求, 证明我还活着
+3. 停止服务, 向注册中心发送 cancel 请求, 清空当前服务注册信息
+
+####服务消费者
+
+1. 启动后, 从注册中心拉取服务注册信息
+
+2. 在运行过程中, 定时更新服务注册信息
+
+3. 服务消费者发起远程调用
+
+   a. 服务消费者(北京) 会从服务注册中心选择同机房的服务提供者(北京)发起远程调用. 只有同机房的服务提供者挂了才会选择其他机房的服务提供者(天津)
+
+   b. 服务消费者(天津) 因为同机房内没有服务提供者, 则会按负载均衡算法选择北京或青岛的服务提供者发起远程调用
+
+#### 注册中心
+
+1. 启动后, 从其他节点拉取服务注册信息
+2. 运行过程中, 会定时运行 evict 任务, 剔除没有按时 renew 的任务(包括非正常停止和网络故障的服务)
+3. 运行过程中, 接受到 registry, renew, cancel 请求, 都会同步至其他注册中心节点
+
+
+
+#####Eureka Client：
+
+注册中心客户端，向注册中心注册服务的应用都可以叫做Eureka Client（**包括Eureka Server本身**, 因为 Eureka Server 本身也是可以注册到注册中心的）
+
+**在实际使用中我们通常会在 yml 配置文件中添加一下信息**
+
+```yml
+eureka:
+  client:
+    register-with-eureka: false   #当前eureka-server 自己不注册进服务列表中
+```
+
+######  EurekaClientConfigBean 
+
+Eureka client 特性配置类
+
+```java
+@ConfigurationProperties(EurekaClientConfigBean.PREFIX)
+public class EurekaClientConfigBean implements EurekaClientConfig {
+    // 定时从 Eureka Server 拉取服务注册信息的时间间隔
+	private int registryFetchIntervalSeconds = 30;
+    
+    // 定时将实例信息(如果变化了)复制到 Eureka Server 的时间间隔 InstanceInfoReplicator 线程
+    private int instanceInfoReplicationIntervalSeconds = 30;
+    
+    // 首次将实例信息复制到 Eureka Server 的延迟时间 InstanceInfoReplicator 线程
+    private int initialInstanceInfoReplicationIntervalSeconds = 40;
+    
+    // 从 Eureka Server 读取信息的超时时间
+    private int eurekaServerReadTimeoutSeconds = 8;
+    
+    // Eureka Client 第一次启动时获取服务注册信息的调用的回溯实现. 首次启动会检查有没有 BackupRegistry 的实现类, 有, 则优先从这个实现类中获取服务注册信息
+    private String backupRegistryImpl;
+    
+    // 允许从 Eureka Client 连接到所有 Eureka Server 的连接总数
+    private int eurekaServerTotalConnections = 200;
+    
+    // Eureka Client 连接到单台 Eureka Server 的连接总数
+    private int eurekaServerTotalConnectionsPerHost = 50;
+    
+    // Eureka Client 和 Eureka Server 之间的 Http 连接的空闲超时时间, 防火墙会在几分钟后清除空闲连接, 导致这些连接处于不确定状态
+    private int eurekaConnectionIdleTimeoutSeconds = 30;
+    
+    // 心跳检测线程池大小
+    private int heartbeatExecutorThreadPoolSize = 2;
+    
+    // 在检测心跳过程中超时再次执行检测的最大延迟时间
+    // 10 * eureka.instance.leaseRenewalIntervalInSeconds 
+    private int heartbeatExecutorExponentialBackOffBound = 10;
+    
+    // 获取注册信息 cacheRefreshExecutorThreadPoolSize 大小
+    private int cacheRefreshExecutorThreadPoolSize = 2;
+    
+    // cacheRefreshExecutor 再次执行的最大延迟倍数
+    // 10 *eureka.client.registryFetchIntervalSeconds
+    private int cacheRefreshExecutorExponentialBackOffBound = 10;
+}
+```
 
 Eureka 注册中心启动, 会加载 EurekaServerConfig 和 EurekaClientConfig 配置的相关连接信息(有点类似 JDBC 连接数据库那部分配置)
 
 ApplicationInfoManager(Sinleton): 初始化注册到Eureka服务器所需信息和其他组件
 
-EurekaClient: 负责管理注册到注册中心的客户端, 数据的存储, 缓存, 剔除, 更新
+EurekaClient: 负责管理注册到注册中心的客户端, 数据的存储, 缓存, 服务的剔除和更新
 
 InstanceRegistry: 处理所有来至 eureka 客户端注册表请求
 
@@ -40,21 +229,6 @@ InstanceRegistry: 处理所有来至 eureka 客户端注册表请求
 ####EurekaServerAutoConfiguration
 
 ```java
-/*
- * Copyright 2013-2017 the original author or authors.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
 /**
  * @author Gunnar Hillert
  * @author Biju Kunjummen
@@ -190,16 +364,6 @@ public class EurekaServerAutoConfiguration extends WebMvcConfigurerAdapter {
 	}
 	
 	/**
-	 * {@link PeerEurekaNodes} which updates peers when /refresh is invoked.
-	 * Peers are updated only if
-	 * <code>eureka.client.use-dns-for-fetching-service-urls</code> is
-	 * <code>false</code> and one of following properties have changed.
-	 * </p>
-	 * <ul>
-	 * <li><code>eureka.client.availability-zones</code></li>
-	 * <li><code>eureka.client.region</code></li>
-	 * <li><code>eureka.client.service-url.&lt;zone&gt;</code></li>
-	 * </ul>
 	 */
 	static class RefreshablePeerEurekaNodes extends PeerEurekaNodes
 			implements ApplicationListener<EnvironmentChangeEvent> {
