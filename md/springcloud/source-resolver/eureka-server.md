@@ -269,7 +269,6 @@ public class EurekaServerAutoConfiguration extends WebMvcConfigurerAdapter {
   	// 静态属性初始哈 CloudJacksonJson extends LegacyJacksonJson 所以先加载父类
   	// LegacyJacksonJson 中 protected final EurekaJacksonCodec codec = new EurekaJacksonCodec();
   	// EurekaJacksonCodec 参考下面描述 1.1
-  	// 一句话总结: 通过静态属性一步步加载 EurekaClientConfig, 但是加载完还是为 null, 初始化在 eureka server 后
   	// 1.2 上面流程走完, CloudJacksonJson protected final CloudJacksonCodec codec = new CloudJacksonCodec(); 加载自己属性, 作用同 1.1
 	public static final CloudJacksonJson JACKSON_JSON = new CloudJacksonJson();
 
@@ -290,7 +289,7 @@ public class EurekaServerAutoConfiguration extends WebMvcConfigurerAdapter {
             // 是否将自己注册进 eureka 服务中心, 我们这配置文件中为 false
 			if (clientConfig.shouldRegisterWithEureka()) {
 				// Set a sensible default if we are supposed to replicate
-              	// 注册信息同步重试次数, 默认 0, 
+              	// server 注册信息同步重试次数, 默认 0, 
 				server.setRegistrySyncRetries(5);
 			}
 			return server;
@@ -303,6 +302,7 @@ public class EurekaServerAutoConfiguration extends WebMvcConfigurerAdapter {
 		return new EurekaController(this.applicationInfoManager);
 	}
 
+    // 执行完会初始化 EurekaClientConfigBean, 配置大部分都是使用的默认属性, 我们自己可以根据项目需要, 可以对属性种子进行配置
 	static {
       	// 2 加载 eureka 编码器, 用作数据编码解码, 可参考 CodecWrappers 查看具体有哪些实现类
       	// CodecWrappers 工厂类, 用于生产 CodecWrapper
@@ -337,7 +337,7 @@ public class EurekaServerAutoConfiguration extends WebMvcConfigurerAdapter {
 		}
 	}
 
-  	// 5. 此处为核心开始
+  	// 5. 此处为核心开始,实例注册
 	@Bean
 	public PeerAwareInstanceRegistry peerAwareInstanceRegistry(
 			ServerCodecs serverCodecs) {
@@ -576,10 +576,16 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
 }
 ```
 
-#### AbstractInstanceRegistry
+#### AbstractInstanceRegistry 1322
 
 ```java
 public abstract class AbstractInstanceRegistry implements InstanceRegistry {
+    // 保存
+    private ConcurrentLinkedQueue<RecentlyChangedItem> recentlyChangedQueue = new ConcurrentLinkedQueue<RecentlyChangedItem>();
+    // 
+    private Timer deltaRetentionTimer = new Timer("Eureka-DeltaRetentionTimer", true);
+    // Eureka 定时执行 evict 方法任务调度器
+    private Timer evictionTimer = new Timer("Eureka-EvictionTimer", true);
   	// 创建一个新的空示例
   	protected AbstractInstanceRegistry(EurekaServerConfig serverConfig, EurekaClientConfig 	clientConfig, ServerCodecs serverCodecs) {
         this.serverConfig = serverConfig;
@@ -589,7 +595,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
         this.recentRegisteredQueue = new CircularQueue<Pair<Long, String>>(1000);
 
         this.renewsLastMin = new MeasuredRate(1000 * 60 * 1);
-		// 
+		// 延迟 30 秒, 让后每个30 秒执行一次
         this.deltaRetentionTimer.schedule(getDeltaRetentionTask(),
                 serverConfig.getDeltaRetentionTimerIntervalInMs(),
                 serverConfig.getDeltaRetentionTimerIntervalInMs());
