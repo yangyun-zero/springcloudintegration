@@ -7,7 +7,7 @@
     <groupId>com.yangyun.springcloud</groupId>
     <artifactId>springcloudintegration</artifactId>
     <packaging>pom</packaging>
-    <version>1.0-SNAPSHOT</version>
+    <version>1.0.0</version>
     <modules>
         <module>microservice-configcenter-1000</module>
         <module>microservice-config-eureka-server-7001</module>
@@ -16,6 +16,8 @@
         <module>microservice-config-provider-8001</module>
         <module>microservice-config-provider-8002</module>
         <module>microservice-config-provider-8003</module>
+        <module>microservice-config-eureka-api</module>
+        <module>microservice-config-consumer-80</module>
     </modules>
 
     <properties>

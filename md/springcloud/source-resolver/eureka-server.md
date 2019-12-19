@@ -224,7 +224,7 @@ InstanceRegistry: 处理所有来至 eureka 客户端注册表请求
 
 ![../images/eurekaserver1.png](../images/eurekaserver1.png)
 
-###Eureka 注册中心启动原理
+###Eureka 注册中心启动源码
 
 ####EurekaServerAutoConfiguration
 
@@ -337,7 +337,7 @@ public class EurekaServerAutoConfiguration extends WebMvcConfigurerAdapter {
 		}
 	}
 
-  	// 5. 此处为核心开始,实例注册
+  	// 5. 此处为核心开始,实例注册, 初始化工作
 	@Bean
 	public PeerAwareInstanceRegistry peerAwareInstanceRegistry(
 			ServerCodecs serverCodecs) {
@@ -354,11 +354,13 @@ public class EurekaServerAutoConfiguration extends WebMvcConfigurerAdapter {
 				this.instanceRegistryProperties.getDefaultOpenForTrafficCount());
 	}
 
+    // step 6. 准备工作, 
+    // 作用: 更新其他节点信息
 	@Bean
 	@ConditionalOnMissingBean
 	public PeerEurekaNodes peerEurekaNodes(PeerAwareInstanceRegistry registry,
 			ServerCodecs serverCodecs) {
-      	// 真正开始初始化 eureka 注册中心相关信息
+            // 真正开始初始化 eureka 注册中心相关信息
 		return new RefreshablePeerEurekaNodes(registry, this.eurekaServerConfig,
 				this.eurekaClientConfig, serverCodecs, this.applicationInfoManager);
 	}
@@ -412,6 +414,7 @@ public class EurekaServerAutoConfiguration extends WebMvcConfigurerAdapter {
 		}
 	}
 
+    // step 7. 执行 step 6 的相关 task
 	@Bean
 	public EurekaServerContext eurekaServerContext(ServerCodecs serverCodecs,
 			PeerAwareInstanceRegistry registry, PeerEurekaNodes peerEurekaNodes) {
@@ -419,6 +422,7 @@ public class EurekaServerAutoConfiguration extends WebMvcConfigurerAdapter {
 				registry, peerEurekaNodes, this.applicationInfoManager);
 	}
 
+    // step 8. 初始化 Eureka 容器, 到这里, Eureka 启动完成
 	@Bean
 	public EurekaServerBootstrap eurekaServerBootstrap(PeerAwareInstanceRegistry registry,
 			EurekaServerContext serverContext) {
@@ -573,14 +577,95 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
         this.instanceStatusOverrideRule = new FirstMatchWinsCompositeRule(new DownOrStartingRule(),
                 new OverrideExistsRule(overriddenInstanceStatusMap), new LeaseExistsRule());
     }
+    
+    // 在 7 之后, Eureka Server 上下文初始化后执行
+    @Override
+    public void init(PeerEurekaNodes peerEurekaNodes) throws Exception {
+        // 节点计数器
+        this.numberOfReplicationsLastMin.start();
+        this.peerEurekaNodes = peerEurekaNodes;
+        // 初始化缓存数据层, 详见 ResponseCacheImpl
+        initializedResponseCache();
+        // 15 分钟更新一次续约阀值, 确保由于网络问题而导致太多实例失效
+        scheduleRenewalThresholdUpdateTask();
+        initRemoteRegionRegistry();
+
+        try {
+            // 监听注册
+            Monitors.registerObject(this);
+        } catch (Throwable e) {
+            logger.warn("Cannot register the JMX monitor for the InstanceRegistry :", e);
+        }
+    }
+    
+    private void scheduleRenewalThresholdUpdateTask() {
+        timer.schedule(new TimerTask() {
+            @Override
+            public void run() {
+                updateRenewalThreshold();
+            }
+        }, serverConfig.getRenewalThresholdUpdateIntervalMs(),
+                       serverConfig.getRenewalThresholdUpdateIntervalMs());
+    }
+    
+    private void updateRenewalThreshold() {
+        try {
+            Applications apps = eurekaClient.getApplications();
+            int count = 0;
+            // 已经注册的服务的数量
+            for (Application app : apps.getRegisteredApplications()) {
+                for (InstanceInfo instance : app.getInstances()) {
+                    if (this.isRegisterable(instance)) {
+                        ++count;
+                    }
+                }
+            }
+            synchronized (lock) {
+                // Update threshold only if the threshold is greater than the
+                // current expected threshold of if the self preservation is disabled.
+                // serverConfig.getRenewalPercentThreshold() = 0.85
+                // 参考 AbstractInstanceRegistry.getNumOfRenewsInLastMin()
+                if ((count * 2) > (serverConfig.getRenewalPercentThreshold() * numberOfRenewsPerMinThreshold)
+                        || (!this.isSelfPreservationModeEnabled())) {
+                    this.expectedNumberOfRenewsPerMin = count * 2;
+                    this.numberOfRenewsPerMinThreshold = (int) ((count * 2) * serverConfig.getRenewalPercentThreshold());
+                }
+            }
+            logger.info("Current renewal threshold is : {}", numberOfRenewsPerMinThreshold);
+        } catch (Throwable e) {
+            logger.error("Cannot update renewal threshold", e);
+        }
+    }
 }
 ```
 
-#### AbstractInstanceRegistry 1322
+####ResponseCacheImpl
+
+```java
+public class ResponseCacheImpl implements ResponseCache {
+    // 定时任务, 定时将二级缓存中的数据同步到一级缓存中(包括了删除和加载)
+    private final java.util.Timer timer = new java.util.Timer("Eureka-CacheFillTimer", true);
+    // 一级缓存, 本质上是 HasMap, 无过期时间, 保存服务信息的对外输出数据结构
+    private final ConcurrentMap<Key, Value> readOnlyCacheMap = new ConcurrentHashMap<Key, Value>();
+    // 二级缓存, 本质是 guava 的缓存, 包含失效机制, 保存服务信息的对外输出数据结构
+    private final LoadingCache<Key, Value> readWriteCacheMap;
+}
+```
+
+#### AbstractInstanceRegistry 
+
+ https://blog.csdn.net/qq_27529917/article/details/80934523 
 
 ```java
 public abstract class AbstractInstanceRegistry implements InstanceRegistry {
-    // 保存
+    // 数据存储层, 存储在内存中
+    // 第一层 key: spring.application.name  value: ConcurrentHashMap
+    // 第二层 key: 服务的 InstanceId  value: Lease 对象
+    // Lease 对象中包含了服务详情和服务治理相关的属性
+    private final ConcurrentHashMap<String, Map<String, Lease<InstanceInfo>>> registry
+            = new ConcurrentHashMap<String, Map<String, Lease<InstanceInfo>>>();
+    // 保存注册到 eureka server 中服务的基本信息, 和活动时间, 会定时清除过期或失效的服务
+    // 通过增量信息来保持同步，能够极大的减少Server和Client之间的数据的传输，降低IO消耗。
     private ConcurrentLinkedQueue<RecentlyChangedItem> recentlyChangedQueue = new ConcurrentLinkedQueue<RecentlyChangedItem>();
     // 
     private Timer deltaRetentionTimer = new Timer("Eureka-DeltaRetentionTimer", true);
@@ -593,9 +678,9 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
         this.serverCodecs = serverCodecs;
         this.recentCanceledQueue = new CircularQueue<Pair<Long, String>>(1000);
         this.recentRegisteredQueue = new CircularQueue<Pair<Long, String>>(1000);
-
+		// 计数存活的时间, 分钟为单位
         this.renewsLastMin = new MeasuredRate(1000 * 60 * 1);
-		// 延迟 30 秒, 让后每个30 秒执行一次
+		// 延迟 30 秒, 让后每个30 秒执行一次, 检查 recentlyChangedQueue
         this.deltaRetentionTimer.schedule(getDeltaRetentionTask(),
                 serverConfig.getDeltaRetentionTimerIntervalInMs(),
                 serverConfig.getDeltaRetentionTimerIntervalInMs());
@@ -603,7 +688,223 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
 }
 ```
 
+#### PeerEurekaNodes
 
+管理 Eureka Server 生命周期
+
+```java
+@Singleton
+public class PeerEurekaNodes {
+	// Eureka Server 集群节点
+	private volatile List<PeerEurekaNode> peerEurekaNodes = Collections.emptyList();
+    // Eureka Server 服务地址
+    private volatile Set<String> peerEurekaNodeUrls = Collections.emptySet();
+    
+    
+            PeerAwareInstanceRegistry registry,
+            EurekaServerConfig serverConfig,
+            EurekaClientConfig clientConfig,
+            ServerCodecs serverCodecs,
+            ApplicationInfoManager applicationInfoManager) {
+        this.registry = registry;
+        this.serverConfig = serverConfig;
+        this.clientConfig = clientConfig;
+        this.serverCodecs = serverCodecs;
+        this.applicationInfoManager = applicationInfoManager;
+    }
+
+    // 会在 Eureka Server 上下文初始化后执行 ( 7 之后)
+    public void start() {
+        taskExecutor = Executors.newSingleThreadScheduledExecutor(
+                new ThreadFactory() {
+                    @Override
+                    public Thread newThread(Runnable r) {
+                        Thread thread = new Thread(r, "Eureka-PeerNodesUpdater");
+                        thread.setDaemon(true);
+                        return thread;
+                    }
+                }
+        );
+        try {
+            // 初始化集群节点路径
+            updatePeerEurekaNodes(resolvePeerUrls());
+            // 定时任务
+            Runnable peersUpdateTask = new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        // 为了方便调试 
+                        // 在本地配置文件中添加下面的配置项, 30秒后执行, 系统默认是十分钟
+                        // eureka.server.peer-eureka-nodes-update-interval-ms: 30000
+                        updatePeerEurekaNodes(resolvePeerUrls());
+                    } catch (Throwable e) {
+                        logger.error("Cannot update the replica Nodes", e);
+                    }
+
+                }
+            };
+            
+            // 延迟十分钟后执行 peersUpdateTask, 十分钟后执行下个任务
+            taskExecutor.scheduleWithFixedDelay(
+                    peersUpdateTask,
+                    serverConfig.getPeerEurekaNodesUpdateIntervalMs(),
+                    serverConfig.getPeerEurekaNodesUpdateIntervalMs(),
+                    TimeUnit.MILLISECONDS
+            );
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+        for (PeerEurekaNode node : peerEurekaNodes) {
+            logger.info("Replica node URL:  {}", node.getServiceUrl());
+        }
+    }
+    
+    // 解析配置文件中配置的集群的路径
+    protected List<String> resolvePeerUrls() {
+        // 本身基本信息
+        InstanceInfo myInfo = applicationInfoManager.getInfo();
+        String zone = InstanceInfo.getZone(clientConfig.getAvailabilityZones(clientConfig.getRegion()), myInfo);
+        // 当配置文件中配置了集群配置, 解析获取其他节点的地址
+        List<String> replicaUrls = EndpointUtils
+                .getDiscoveryServiceUrls(clientConfig, zone, new EndpointUtils.InstanceInfoBasedUrlRandomizer(myInfo));
+
+        int idx = 0;
+        while (idx < replicaUrls.size()) {
+            if (isThisMyUrl(replicaUrls.get(idx))) {
+                replicaUrls.remove(idx);
+            } else {
+                idx++;
+            }
+        }
+        return replicaUrls;
+    }
+    
+    // 更新其他节点的信息
+    protected void updatePeerEurekaNodes(List<String> newPeerUrls) {
+        if (newPeerUrls.isEmpty()) {
+            logger.warn("The replica size seems to be empty. Check the route 53 DNS Registry");
+            return;
+        }
+
+        Set<String> toShutdown = new HashSet<>(peerEurekaNodeUrls);
+        // 失效节点
+        toShutdown.removeAll(newPeerUrls);
+        Set<String> toAdd = new HashSet<>(newPeerUrls);
+        // 新增节点
+        toAdd.removeAll(peerEurekaNodeUrls);
+
+        // 说明集群节点没有改变
+        if (toShutdown.isEmpty() && toAdd.isEmpty()) { // No change
+            return;
+        }
+
+        // Remove peers no long available 
+        List<PeerEurekaNode> newNodeList = new ArrayList<>(peerEurekaNodes);
+
+        // 移除已经失效的节点
+        if (!toShutdown.isEmpty()) {
+            logger.info("Removing no longer available peer nodes {}", toShutdown);
+            int i = 0;
+            while (i < newNodeList.size()) {
+                PeerEurekaNode eurekaNode = newNodeList.get(i);
+                if (toShutdown.contains(eurekaNode.getServiceUrl())) {
+                    newNodeList.remove(i);
+                    eurekaNode.shutDown();
+                } else {
+                    i++;
+                }
+            }
+        }
+
+        // Add new peers
+        if (!toAdd.isEmpty()) {
+            logger.info("Adding new peer nodes {}", toAdd);
+            for (String peerUrl : toAdd) {
+                newNodeList.add(createPeerEurekaNode(peerUrl));
+            }
+        }
+
+        this.peerEurekaNodes = newNodeList;
+        this.peerEurekaNodeUrls = new HashSet<>(newPeerUrls);
+    }
+    
+    protected PeerEurekaNode createPeerEurekaNode(String peerEurekaNodeUrl) {
+        HttpReplicationClient replicationClient = JerseyReplicationClient.createReplicationClient(serverConfig, serverCodecs, peerEurekaNodeUrl);
+        String targetHost = hostFromUrl(peerEurekaNodeUrl);
+        if (targetHost == null) {
+            targetHost = "host";
+        }
+        return new PeerEurekaNode(registry, targetHost, peerEurekaNodeUrl, replicationClient, serverConfig);
+    }
+    
+    
+}
+```
+
+#### DefaultEurekaServerContext
+
+```java
+/**
+	Eureka 上下文
+ */
+public class DefaultEurekaServerContext implements EurekaServerContext {
+	public DefaultEurekaServerContext(EurekaServerConfig serverConfig,
+                               ServerCodecs serverCodecs,
+                               PeerAwareInstanceRegistry registry,
+                               PeerEurekaNodes peerEurekaNodes,
+                               ApplicationInfoManager applicationInfoManager) {
+        this.serverConfig = serverConfig;
+        this.serverCodecs = serverCodecs;
+        this.registry = registry;
+        this.peerEurekaNodes = peerEurekaNodes;
+        this.applicationInfoManager = applicationInfoManager;
+    }
+
+    // 在执行构造方法后执行
+    @PostConstruct
+    @Override
+    public void initialize() {
+        logger.info("Initializing ...");
+        // 执行 6 PeerEurekaNodes 初始化
+        peerEurekaNodes.start();
+        try {
+            registry.init(peerEurekaNodes);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        logger.info("Initialized");
+    }
+}
+```
+
+#### EurekaServerInitializerConfiguration
+
+配置类, 用于初始化 Eureka 容器
+
+```java
+@Configurationpublic class EurekaServerInitializerConfiguration      implements ServletContextAware, SmartLifecycle, Ordered {
+    public void start() {
+		new Thread(new Runnable() {
+			@Override
+			public void run() {
+				try {
+					//TODO: is this class even needed now?
+			eurekaServerBootstrap.contextInitialized(EurekaServerInitializerConfiguration.this.servletContext);
+					log.info("Started Eureka Server");
+
+					publish(new EurekaRegistryAvailableEvent(getEurekaServerConfig()));
+					EurekaServerInitializerConfiguration.this.running = true;
+					publish(new EurekaServerStartedEvent(getEurekaServerConfig()));
+				}
+				catch (Exception ex) {
+					// Help!
+					log.error("Could not initialize Eureka servlet context", ex);
+				}
+			}
+		}).start();
+	}
+}
+```
 
 #### CloudEurekaClient extends DiscoveryClient 
 
