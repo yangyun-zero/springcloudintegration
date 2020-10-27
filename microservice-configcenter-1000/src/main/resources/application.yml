@@ -8,7 +8,7 @@ spring:
     config:
       server:
         git:
-          uri: https://github.com/SamsaraCloud/microservicecloud-config.git  # config 读取配置文件所在 git 仓库
+          uri: https://github.com/yangyun-zero/microservicecloud-config.git  # config 读取配置文件所在 git 仓库
         # 安全验证下还需要 git 的用户密码
 #        username:
 #        password:

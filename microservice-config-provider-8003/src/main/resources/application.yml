@@ -11,4 +11,3 @@ eureka:
     instance:
       instance-id: provider-8003.com
 info:
-  app.name: microservice-config-provider-client8003

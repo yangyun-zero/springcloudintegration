@@ -16,7 +16,6 @@
         <module>microservice-config-provider-8001</module>
         <module>microservice-config-provider-8002</module>
         <module>microservice-config-provider-8003</module>
-        <module>microservice-config-eureka-api</module>
         <module>microservice-config-consumer-80</module>
     </modules>
 
@@ -76,6 +75,7 @@
                 <artifactId>log4j</artifactId>
                 <version>${log4j.version}</version>
             </dependency>
+
         </dependencies>
     </dependencyManagement>
 
@@ -103,6 +103,14 @@
                          -->
                         <delimit>$</delimit>
                     </delimiters>
+                </configuration>
+            </plugin>
+            <plugin>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <source>${maven.compiler.source}</source>
+                    <target>${maven.compiler.target}</target>
+                    <encoding>UTF-8</encoding>
                 </configuration>
             </plugin>
         </plugins>

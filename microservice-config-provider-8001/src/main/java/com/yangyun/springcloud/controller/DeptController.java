@@ -1,6 +1,7 @@
 package com.yangyun.springcloud.controller;
 
 import com.yangyun.springcloud.entities.Dept;
+import com.yangyun.springcloud.feign.DeptFeign;
 import com.yangyun.springcloud.service.DeptService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.cloud.client.discovery.DiscoveryClient;
@@ -16,24 +17,25 @@ import java.util.List;
  * @Version 1.0
  **/
 @RestController
-public class DeptController {
+@RequestMapping("/dept")
+public class DeptController implements DeptFeign {
 
     @Autowired
     private DeptService service;
 
-    @PostMapping("/dept/add")
+    @PostMapping("/add")
     public boolean add(@RequestBody Dept dept)
     {
         return service.add(dept);
     }
 
-    @GetMapping("/dept/get/{id}")
+    @GetMapping("/get/{id}")
     public Dept get(@PathVariable("id") Long id)
     {
         return service.get(id);
     }
 
-    @GetMapping("/dept/list")
+    @PostMapping("/list")
     public List<Dept> list()
     {
         return service.list();
