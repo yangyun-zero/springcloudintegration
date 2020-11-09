@@ -20,7 +20,7 @@ import org.springframework.cloud.openfeign.EnableFeignClients;
 @EnableCircuitBreaker // 开启 Hystrix 熔断器
 @EnableHystrixDashboard
 public class ConsumerMain_80 {
-    public static void main(String[] args) {
+    public static void main(String[] args) throws IllegalAccessException, InstantiationException {
         SpringApplication.run(ConsumerMain_80.class);
     }
 }
